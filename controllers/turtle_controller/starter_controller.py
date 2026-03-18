@@ -28,6 +28,10 @@ class StudentController:
         self.translation_threshold = 0.05
         self.rotation_threshold = 0.1
         self.optimize_every = 5
+
+        # for fsm drive behavior
+        self.robot_state = "TURN_1"
+        self.state_counter = 0
         
     # HELPER METHODS (there a lot of them):
 
