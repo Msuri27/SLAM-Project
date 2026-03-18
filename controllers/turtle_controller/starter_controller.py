@@ -2,6 +2,7 @@
 
 import math
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 class StudentController:
@@ -25,15 +26,71 @@ class StudentController:
 
         # TODO: tune these
         # key frame and optimization params 
-        self.translation_threshold = 0.2
-        self.rotation_threshold = 0.5
-        self.optimize_every = 5
+        self.translation_threshold = 0.25
+        self.rotation_threshold = 0.3
+        self.optimize_every = 10
 
         # for fsm drive behavior
         self.robot_state = "TURN_1"
         self.state_counter = 0
+
+        # for trajectory plotting
+        self.init_plot()
+        self.step_count = 0
+
+
+    def init_plot(self):
+        """Sets up the live matplotlib window."""
+        plt.ion()  # Turn on interactive mode so it doesn't block Webots
+        self.fig, self.ax = plt.subplots(figsize=(6, 6))
         
-    # HELPER METHODS (there a lot of them):
+        # Based on your 5x5m arena image, -3 to 3 should cover everything perfectly
+        self.ax.set_xlim(-3, 3)
+        self.ax.set_ylim(-3, 3)
+        self.ax.set_title("Live GraphSLAM Map")
+        self.ax.set_xlabel("X (meters)")
+        self.ax.set_ylabel("Y (meters)")
+        self.ax.grid(True, linestyle='--', alpha=0.7)
+        
+        # Initialize empty plot objects that we will update rapidly
+        self.path_line, = self.ax.plot([], [], 'b-', linewidth=2, label='Estimated Path')
+        self.landmark_scatter = self.ax.scatter([], [], c='red', marker='s', s=100, label='Boxes')
+        self.robot_arrow = None  # Placeholder for the robot's heading arrow
+        
+        self.ax.legend(loc='upper right')
+        plt.show()
+
+    def update_plot(self):
+        """Rapidly refreshes the plot with current graph state."""
+        # 1. Update the robot path (blue line)
+        if len(self.poses) > 0:
+            xs = [p[0] for p in self.poses]
+            ys = [p[1] for p in self.poses]
+            self.path_line.set_data(xs, ys)
+            
+            # 2. Update the live robot position and heading (green arrow)
+            if self.robot_arrow:
+                self.robot_arrow.remove()
+            
+            current_x, current_y, current_theta = self.current_pose
+            # Calculate arrow direction
+            dx = 0.2 * np.cos(current_theta)
+            dy = 0.2 * np.sin(current_theta)
+            self.robot_arrow = self.ax.arrow(current_x, current_y, dx, dy, 
+                                             head_width=0.1, head_length=0.1, 
+                                             fc='green', ec='green')
+
+        # 3. Update the landmarks (red squares)
+        if len(self.landmarks) > 0:
+            lx = [m[0] for m in self.landmarks.values()]
+            ly = [m[1] for m in self.landmarks.values()]
+            self.landmark_scatter.set_offsets(np.c_[lx, ly])
+
+        # Force matplotlib to draw the new frame immediately
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()    
+        
+    # GRAPH HELPER METHODS (there a lot of them):
 
     # angle wrapper helper
     def wrap_angle(self, theta):
@@ -144,7 +201,7 @@ class StudentController:
         dim = (num_poses * 3) + (num_landmarks * 2)
 
         # TODO: Tune this
-        num_iterations = 3 
+        num_iterations = 8 
         for iteration in range(num_iterations):
             # size hessian
             H = np.zeros((dim,dim), dtype=float)
@@ -468,6 +525,10 @@ class StudentController:
             # victory dance
             control_dict["left_motor"] = -3.0
             control_dict["right_motor"] = 3.0
+
+        self.step_count += 1
+        if self.step_count % 10 == 0:
+            self.update_plot()
 
         print(f"POSE: {estimated_pose}")
         print(f"MAP: {estimated_map}")
