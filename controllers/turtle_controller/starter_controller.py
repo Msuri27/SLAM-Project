@@ -130,15 +130,102 @@ class StudentController:
 
         return e, Jx, Jm
     
-    # TODO IMPLEMENT LATER
+    # this will probably be a major computational bottleneck :(
     def run_graph_optimization(self):
         num_poses = len(self.poses)
         num_landmarks = len(self.landmarks)
 
         # total size of state vector
         dim = (num_poses * 3) + (num_landmarks * 2)
-        
-        pass
+
+        # size hessian
+        H = np.zeros((dim,dim), dtype=float)
+        g = np.zeros((dim, 1), dtype=float)
+
+        # landmark keys
+        landmark_list = list(self.landmarks.keys())
+        # map key indexes to keys
+        landmark_idx_map = {l_id: i for i, l_id in enumerate(landmark_list)}
+
+        # TODO: information matrix; tune based on turtle_controller noise
+        omega_prior = np.identity(3) * 1000.0
+        omega_odom = np.identity(3) * 10.0
+        omega_obs = np.identity(2) * 5.0
+
+        # compute residual function and jacobian for prior
+        e_prior, J_prior = self.compute_prior_factor(self.poses[0], np.array([0.0, 0.0, 0.0]))
+
+        # build hessian and gradient for optimization problem using what i computed in prior
+        H_prior = J_prior.T @ omega_prior @ J_prior
+        g_prior = J_prior.T @ omega_prior @ e_prior
+
+        # add to global hessian and gradient
+        H[0:3, 0:3] += H_prior
+        g[0:3, 0:] += g_prior
+
+        # loop through odom factors
+        for factor in self.odom_factors:
+            i = factor["i"]
+            j = factor["j"]
+            meas = factor["measurement"]
+
+            # compute residual function and jacobian(s) for prior
+            e_odom, A, B = self.compute_odom_factor(self.poses[i], self.poses[j], meas)
+
+            # more local hessians and gradients but this time for odometry factors
+            H_ii = A.T @ omega_odom @ A
+            H_ij = A.T @ omega_odom @ B
+            H_ji = B.T @ omega_odom @ A
+            H_jj = B.T @ omega_odom @ B
+            g_i = A.T @ omega_odom @ e_odom
+            g_j = B.T @ omega_odom @ e_odom
+
+            # continue to build global hessians in corresponding indices
+            H[i*3 : i*3+3, i*3 : i*3+3] += H_ii
+            H[i*3 : i*3+3, j*3 : j*3+3] += H_ij
+            H[j*3 : j*3+3, i*3 : i*3+3] += H_ji
+            H[j*3 : j*3+3, j*3 : j*3+3] += H_jj
+            
+            g[i*3 : i*3+3, 0:] += g_i
+            g[j*3 : j*3+3, 0:] += g_j
+
+        # loop through obs_factors
+        for factor in self.obs_factors:
+            i = factor["pose_idx"]
+            l_id = factor["landmark_id"]
+            meas = factor["measurement"]
+            
+            # final residual func and jacobian for obs
+            e_obs, Jx, Jm = self.compute_obs_factor(self.poses[i], self.landmarks[l_id], meas)
+            
+            # more local hessians
+            H_xx = Jx.T @ omega_obs @ Jx
+            H_xm = Jx.T @ omega_obs @ Jm
+            H_mx = Jm.T @ omega_obs @ Jx
+            H_mm = Jm.T @ omega_obs @ Jm
+            g_x = Jx.T @ omega_obs @ e_obs
+            g_m = Jm.T @ omega_obs @ e_obs
+
+            # start and end index for pose
+            p_start = i * 3
+            p_end = p_start + 3
+
+            # start and end index for map coords
+            m_start = (num_poses * 3) + (landmark_idx_map[l_id] * 2)
+            m_end = m_start + 2
+
+            # adding local hessians to global hessian based on coords
+            H[p_start:p_end, p_start:p_end] += H_xx  # pose vs pose
+            H[p_start:p_end, m_start:m_end] += H_xm  # pose vs landmark
+            H[m_start:m_end, p_start:p_end] += H_mx  # landmark vs pose
+            H[m_start:m_end, m_start:m_end] += H_mm  # landmark vs landmark
+
+            g[p_start:p_end, 0:] += g_x
+            g[m_start:m_end, 0:] += g_m
+
+        # computer go brrr
+        delta = np.linalg.solve(H, -g)
+
     
     # LOOP:
     def step(self, sensors):
