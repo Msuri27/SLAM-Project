@@ -28,7 +28,7 @@ class StudentController:
         self.rotation_threshold = 0.1
         self.optimize_every = 5
         
-    # HELPER METHODS:
+    # HELPER METHODS (there a lot of them):
 
     # angle wrapper helper
     def wrap_angle(self, theta):
@@ -62,8 +62,82 @@ class StudentController:
 
         return np.array([mx, my], dtype=float)
     
+    def compute_prior_factor(self, pose: np.ndarray, measurement: np.ndarray):
+        x, y, theta = pose
+        x_meas, y_meas, theta_meas = measurement
+
+        e = np.array([[x - x_meas], 
+                      [y - y_meas], 
+                      [self.wrap_angle(theta - theta_meas)]], dtype=float)
+        J = np.identity(3)
+
+        return e, J
+    
+    def compute_odom_factor(self, pose_i: np.ndarray, pose_j: np.ndarray, measurement: np.ndarray):
+        x_i, y_i, theta_i = pose_i
+        x_j, y_j, theta_j = pose_j
+        
+        ds_meas = measurement[0]
+        # measurement[1] is 0.0
+        dtheta_meas = measurement[2]
+
+        c = np.cos(theta_i)
+        s = np.sin(theta_i)
+        R = np.array([[c, s], 
+                      [-s, c]])
+
+        dx = x_j - x_i
+        dy = y_j - y_i
+        dtheta = theta_j - theta_i
+        d = np.array([dx, dy])
+
+        d_rot = R @ d
+        e = np.array([[d_rot[0] - ds_meas], 
+                      [d_rot[1] - 0.0],
+                      [self.wrap_angle(dtheta - dtheta_meas)]], dtype=float)
+
+        A = np.array([[-c, -s, -s*dx + c*dy],
+                      [s, -c, -c*dx - s*dy],
+                      [0, 0, -1]])
+        B = np.array([[c, s, 0],
+                      [-s, c, 0],
+                      [0, 0, 1]])
+        
+        return e, A, B
+    
+    def compute_obs_factor(self, pose: np.ndarray, landmark: np.ndarray, measurement: np.ndarray):
+        """
+        measurement: np.array([r, phi])
+        Returns e (2x1 array), Jx (2x3 array), Jm (2x2 array)
+        """
+        x, y, theta = pose
+        mx, my = landmark
+        r_meas, phi_meas = measurement
+
+        dx = mx - x
+        dy = my - y
+
+        r_pred = np.hypot(dx, dy)
+        phi_pred = self.wrap_angle(np.arctan2(dy, dx) - theta)
+
+        e = np.array([[r_pred - r_meas],
+                      [self.wrap_angle(phi_pred - phi_meas)]], dtype=float)
+
+        Jx = np.array([[-dx/r_pred, -dy/r_pred, 0],
+                      [dy/(r_pred**2), -dx/(r_pred**2), -1]])
+        Jm = np.array([[dx/r_pred, dy/r_pred],
+                      [-dy/(r_pred**2), dx/(r_pred**2)]])
+
+        return e, Jx, Jm
+    
     # TODO IMPLEMENT LATER
     def run_graph_optimization(self):
+        num_poses = len(self.poses)
+        num_landmarks = len(self.landmarks)
+
+        # total size of state vector
+        dim = (num_poses * 3) + (num_landmarks * 2)
+        
         pass
     
     # LOOP:
