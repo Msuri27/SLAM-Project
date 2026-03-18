@@ -25,8 +25,8 @@ class StudentController:
 
         # TODO: tune these
         # key frame and optimization params 
-        self.translation_threshold = 0.05
-        self.rotation_threshold = 0.1
+        self.translation_threshold = 0.2
+        self.rotation_threshold = 0.5
         self.optimize_every = 5
 
         # for fsm drive behavior
@@ -156,9 +156,9 @@ class StudentController:
             landmark_idx_map = {l_id: i for i, l_id in enumerate(landmark_list)}
 
             # TODO: information matrix; tune based on turtle_controller noise
-            omega_prior = np.identity(3) * 1000.0
-            omega_odom = np.identity(3) * 10.0
-            omega_obs = np.identity(2) * 5.0
+            omega_prior = np.identity(3) * 1000000.0
+            omega_odom = np.diag([40000.0, 10000.0, 40000.0])
+            omega_obs = np.diag([44.4, 100.0])
 
             # compute residual function and jacobian for prior
             e_prior, J_prior = self.compute_prior_factor(self.poses[0], np.array([0.0, 0.0, 0.0]))
