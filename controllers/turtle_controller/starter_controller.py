@@ -333,6 +333,138 @@ class StudentController:
         estimated_pose = self.current_pose
         estimated_map = self.landmarks
 
+        x = estimated_pose[0]
+        y = estimated_pose[1]
+        theta = estimated_pose[2]
+
+        # this is from the old state estimation assignment just here as a placeholder
+        required_frames = 3
+
+        # turn Left 45 degrees (towards ~0.785 radians)
+        if self.robot_state == "TURN_1":
+            control_dict["left_motor"] = -3.0
+            control_dict["right_motor"] = 3.0
+            
+            if theta > 0.78:
+                self.state_counter += 1
+            else:
+                self.state_counter = 0
+                
+            # trigger state change after 3 consecutive frames
+            if self.state_counter >= required_frames:
+                self.robot_state = "DRIVE_1"
+                self.state_counter = 0
+
+        # drive straight to top-right box (~1.0, 1.0)
+        elif self.robot_state == "DRIVE_1":
+            control_dict["left_motor"] = 3.0
+            control_dict["right_motor"] = 3.0
+            
+            # stop when we are within 1ish tile of box
+            if y > 0.7 and x > 0.7:
+                self.state_counter += 1
+            else:
+                self.state_counter = 0
+                
+            if self.state_counter >= required_frames:
+                self.robot_state = "TURN_2"
+                self.state_counter = 0
+
+        # turn Right 135 degrees. We are at 45 (0.785), going to -90 (-1.57)
+        elif self.robot_state == "TURN_2":
+            control_dict["left_motor"] = 3.0
+            control_dict["right_motor"] = -3.0
+            
+            # stop when facing straight down (-90 degrees is -1.57 rad)
+            if theta < -1.4:
+                self.state_counter += 1
+            else:
+                self.state_counter = 0
+                
+            if self.state_counter >= required_frames:
+                self.robot_state = "DRIVE_2"
+                self.state_counter = 0
+
+        elif self.robot_state == "DRIVE_2":
+            # drive straight down to bottom-right box (~1.0, -1.0)
+            control_dict["left_motor"] = 3.0
+            control_dict["right_motor"] = 3.0
+            
+            # stop when we are within 1ish tile of box
+            if y < -1.6:
+                self.state_counter += 1
+            else:
+                self.state_counter = 0
+                
+            if self.state_counter >= required_frames:
+                self.robot_state = "TURN_3"
+                self.state_counter = 0
+
+        # turn right 90 degrees to face left (-pi / pi)
+        elif self.robot_state == "TURN_3":
+            control_dict["left_motor"] = 3.0
+            control_dict["right_motor"] = -3.0
+            
+            # NOTE wrapping causes angle to fluctuate between 3.0 and -3.0 so abs(theta) is necessary
+            if abs(theta) > 3.0:
+                self.state_counter += 1
+            else:
+                self.state_counter = 0
+                
+            if self.state_counter >= required_frames:
+                self.robot_state = "DRIVE_3"
+                self.state_counter = 0
+
+        # drive straight left to bottom-left box (~ -1.0, -1.0)
+        elif self.robot_state == "DRIVE_3":
+            control_dict["left_motor"] = 3.0
+            control_dict["right_motor"] = 3.0
+            
+            # stop when we get close to the left wall/box
+            if x < -1.6:
+                self.state_counter += 1
+            else:
+                self.state_counter = 0
+                
+            if self.state_counter >= required_frames:
+                self.robot_state = "TURN_4"
+                self.state_counter = 0
+
+        # turn right 90 degrees to face up (+1.57 rad)
+        elif self.robot_state == "TURN_4":
+            control_dict["left_motor"] = 3.0
+            control_dict["right_motor"] = -3.0
+            
+            # catch it as soon as it drops below 1.6 radians
+            if 0.0 < theta < 1.6:
+                self.state_counter += 1
+            else:
+                self.state_counter = 0
+                
+            if self.state_counter >= required_frames:
+                self.robot_state = "DRIVE_4"
+                self.state_counter = 0
+
+        # drive straight up to top-left box (~ -1.0, 1.0)
+        elif self.robot_state == "DRIVE_4":
+            control_dict["left_motor"] = 3.0
+            control_dict["right_motor"] = 3.0
+            
+            # stop when we get close to the top wall/box
+            if y > 0.7:
+                self.state_counter += 1
+            else:
+                self.state_counter = 0
+                
+            if self.state_counter >= required_frames:
+                self.robot_state = "SPIN_IN_PLACE"
+                self.state_counter = 0
+
+        elif self.robot_state == "SPIN_IN_PLACE":
+            # victory dance
+            control_dict["left_motor"] = -3.0
+            control_dict["right_motor"] = 3.0
+
         print(f"POSE: {estimated_pose}")
         print(f"MAP: {estimated_map}")
 
