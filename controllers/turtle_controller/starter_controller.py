@@ -39,6 +39,11 @@ class StudentController:
         self.robot_state = "EXPLORE"
         self.turn_target = 0.0
 
+        # grid for optimized travel and pose history for unstick
+        self.grid = np.zeros((10, 10))
+        self.pose_history = []
+        self.unstick_frames = 0
+
         # for trajectory plotting
         self.init_plot()
         self.step_count = 0
@@ -540,68 +545,108 @@ class StudentController:
         x, y, theta = self.current_pose
 
         # FSM LOGIC BELOW
-        # 1. this generates semi random escape angles ranging from 90 deg to 270 deg when near a wall
+        # 0. "paint" memory grid
+        # convert physical -2.5m to 2.5m arena into a 0 to 9 grid index
+        col = int(np.clip((x + 2.5) / 0.5, 0, 9))
+        row = int(np.clip((y + 2.5) / 0.5, 0, 9))
+        self.grid[row, col] = 1
+
+        # 1. virtual wall detection
         near_wall = False
         escape_angle = None
+        limit = 2.2 
         
-        limit = 2.2 # trigger turn at 0.3m from wall
-        
-        if x > limit and np.cos(theta) > 0:
+        if (x > limit and np.cos(theta) > 0) or \
+           (x < -limit and np.cos(theta) < 0) or \
+           (y > limit and np.sin(theta) > 0) or \
+           (y < -limit and np.sin(theta) < 0):
             near_wall = True
-            escape_angle = self.wrap_angle(np.pi + np.random.uniform(-0.8, 0.8))
-        elif x < -limit and np.cos(theta) < 0:
-            near_wall = True
-            escape_angle = self.wrap_angle(0.0 + np.random.uniform(-0.8, 0.8))
-        elif y > limit and np.sin(theta) > 0:
-            near_wall = True
-            escape_angle = self.wrap_angle(-np.pi/2 + np.random.uniform(-0.8, 0.8))
-        elif y < -limit and np.sin(theta) < 0:
-            near_wall = True
-            escape_angle = self.wrap_angle(np.pi/2 + np.random.uniform(-0.8, 0.8))
+            
+            # find all unvisited areas on the map
+            unvisited = np.argwhere(self.grid == 0)
+            if len(unvisited) > 0:
+                # convert all unvisited grid indices to physical xy coordinates
+                unvisited_x = (unvisited[:, 1] * 0.5) - 2.25
+                unvisited_y = (unvisited[:, 0] * 0.5) - 2.25
+                
+                # calculate distances from current robot pose (x, y) to all unvisited spots
+                distances = np.sqrt((unvisited_x - x)**2 + (unvisited_y - y)**2)
+                
+                # pick the index of the absolute closest unvisited spot
+                closest_idx = np.argmin(distances)
+                
+                target_x = unvisited_x[closest_idx]
+                target_y = unvisited_y[closest_idx]
+                
+                # aim the robot perfectly at the closest unvisited spot!
+                escape_angle = self.wrap_angle(np.arctan2(target_y - y, target_x - x))
+            else:
+                # fallback if the whole map is painted
+                escape_angle = self.wrap_angle(theta + 3.14)
 
-        # 2. landmark avoidance
+        # 2. smart landmark avoidance
         near_landmark = False
         for landmark_id, (r_meas, phi_meas) in sensors["observed_landmarks"].items():
-            # turn when r measured is less than 0.5 and heading is in 90 deg cone
             if r_meas < 0.5 and abs(phi_meas) < 0.8:
                 near_landmark = True
                 if escape_angle is None:
-                    # turn away from box
+                    # turn away from the box
                     if phi_meas > 0:
-                        # box is to our left so we turn right
                         escape_angle = self.wrap_angle(theta - 1.57)
                     else:
-                        # box is to our right so we turn left
                         escape_angle = self.wrap_angle(theta + 1.57)
                 break
 
+        # 2.5 stuck detection
+        # keep a rolling history of the last 20 poses
+        self.pose_history.append(self.current_pose.copy())
+        if len(self.pose_history) > 20:
+            self.pose_history.pop(0)
+
+        # if we have 20 frames of history, check if we are wedged
+        if len(self.pose_history) == 20 and self.robot_state in ["EXPLORE", "AVOID"]:
+            start_x, start_y, start_theta = self.pose_history[0]
+            d_pos = np.sqrt((x - start_x)**2 + (y - start_y)**2)
+            d_theta = abs(self.wrap_angle(theta - start_theta))
+            
+            # if we moved less than 2cm AND turned less than 0.1 rad in 20 frames... we are stuck  :(
+            if d_pos < 0.02 and d_theta < 0.1:
+                self.robot_state = "UNSTICK_BACKUP"
+                self.unstick_frames = 15  # reverse for 15 frames
+                self.pose_history.clear() # clear history so we don't immediately trigger again
+
         # 3. actual state machine
         if self.robot_state == "EXPLORE":
-            # drive straight
             control_dict["left_motor"] = 4.0
             control_dict["right_motor"] = 4.0
 
-            # when near landmark set state to avoid and wrap turn target angle
             if near_wall or near_landmark:
                 self.robot_state = "AVOID"
                 self.turn_target = escape_angle
 
         elif self.robot_state == "AVOID":
-            # wrap target angle
             angle_diff = self.wrap_angle(self.turn_target - theta)
             
             if angle_diff > 0:
-                # target is to the left so spin ccw
                 control_dict["left_motor"] = -3.0
                 control_dict["right_motor"] = 3.0
             else:
-                # target is to the Right so spin cw
                 control_dict["left_motor"] = 3.0
                 control_dict["right_motor"] = -3.0
 
-            # exit AVOID state when facing the target angle
             if abs(angle_diff) < 0.15:
                 self.robot_state = "EXPLORE"
+
+        elif self.robot_state == "UNSTICK_BACKUP":
+            # reverse the robot
+            control_dict["left_motor"] = -4.0
+            control_dict["right_motor"] = -4.0
+            self.unstick_frames -= 1
+            
+            # once we back up enough, force an AVOID turn to escape the trap
+            if self.unstick_frames <= 0:
+                self.robot_state = "AVOID"
+                self.turn_target = self.wrap_angle(theta + 1.57) # force a 90 deg turn
 
         # update pyplot every 10 frames
         self.step_count += 1
