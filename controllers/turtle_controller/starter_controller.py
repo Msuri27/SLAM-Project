@@ -35,8 +35,8 @@ class StudentController:
         self.Sigma = np.diag([0.001, 0.001, 0.001])
 
         # for fsm drive behavior
-        self.robot_state = "TURN_1"
-        self.state_counter = 0
+        self.robot_state = "EXPLORE"
+        self.turn_target = 0.0
 
         # for trajectory plotting
         self.init_plot()
@@ -507,138 +507,73 @@ class StudentController:
         estimated_pose = self.current_pose.tolist()
         estimated_map = self.landmarks
 
-        x = estimated_pose[0]
-        y = estimated_pose[1]
-        theta = estimated_pose[2]
+        x, y, theta = self.current_pose
 
-        # this is from the old state estimation assignment just here as a placeholder
-        required_frames = 3
+        # FSM LOGIC BELOW
+        # 1. this generates semi random escape angles ranging from 90 deg to 270 deg when near a wall
+        near_wall = False
+        escape_angle = None
+        
+        limit = 2.2 # trigger turn at 0.3m from wall
+        
+        if x > limit and np.cos(theta) > 0:
+            near_wall = True
+            escape_angle = self.wrap_angle(np.pi + np.random.uniform(-0.8, 0.8))
+        elif x < -limit and np.cos(theta) < 0:
+            near_wall = True
+            escape_angle = self.wrap_angle(0.0 + np.random.uniform(-0.8, 0.8))
+        elif y > limit and np.sin(theta) > 0:
+            near_wall = True
+            escape_angle = self.wrap_angle(-np.pi/2 + np.random.uniform(-0.8, 0.8))
+        elif y < -limit and np.sin(theta) < 0:
+            near_wall = True
+            escape_angle = self.wrap_angle(np.pi/2 + np.random.uniform(-0.8, 0.8))
 
-        # turn Left 45 degrees (towards ~0.785 radians)
-        if self.robot_state == "TURN_1":
-            control_dict["left_motor"] = -3.0
-            control_dict["right_motor"] = 3.0
+        # 2. landmark avoidance
+        near_landmark = False
+        for landmark_id, (r_meas, phi_meas) in sensors["observed_landmarks"].items():
+            # turn when r measured is less than 0.5 and heading is in 90 deg cone
+            if r_meas < 0.5 and abs(phi_meas) < 0.8:
+                near_landmark = True
+                if escape_angle is None:
+                    # turn away from box
+                    if phi_meas > 0:
+                        # box is to our left so we turn right
+                        escape_angle = self.wrap_angle(theta - 1.57)
+                    else:
+                        # box is to our right so we turn left
+                        escape_angle = self.wrap_angle(theta + 1.57)
+                break
+
+        # 3. actual state machine
+        if self.robot_state == "EXPLORE":
+            # drive straight
+            control_dict["left_motor"] = 4.0
+            control_dict["right_motor"] = 4.0
+
+            # when near landmark set state to avoid and wrap turn target angle
+            if near_wall or near_landmark:
+                self.robot_state = "AVOID"
+                self.turn_target = escape_angle
+
+        elif self.robot_state == "AVOID":
+            # wrap target angle
+            angle_diff = self.wrap_angle(self.turn_target - theta)
             
-            if theta > 0.78:
-                self.state_counter += 1
+            if angle_diff > 0:
+                # target is to the left so spin ccw
+                control_dict["left_motor"] = -3.0
+                control_dict["right_motor"] = 3.0
             else:
-                self.state_counter = 0
-                
-            # trigger state change after 3 consecutive frames
-            if self.state_counter >= required_frames:
-                self.robot_state = "DRIVE_1"
-                self.state_counter = 0
+                # target is to the Right so spin cw
+                control_dict["left_motor"] = 3.0
+                control_dict["right_motor"] = -3.0
 
-        # drive straight to top-right box (~1.0, 1.0)
-        elif self.robot_state == "DRIVE_1":
-            control_dict["left_motor"] = 3.0
-            control_dict["right_motor"] = 3.0
-            
-            # stop when we are within 1ish tile of box
-            if y > 0.7 and x > 0.7:
-                self.state_counter += 1
-            else:
-                self.state_counter = 0
-                
-            if self.state_counter >= required_frames:
-                self.robot_state = "TURN_2"
-                self.state_counter = 0
+            # exit AVOID state when facing the target angle
+            if abs(angle_diff) < 0.15:
+                self.robot_state = "EXPLORE"
 
-        # turn Right 135 degrees. We are at 45 (0.785), going to -90 (-1.57)
-        elif self.robot_state == "TURN_2":
-            control_dict["left_motor"] = 3.0
-            control_dict["right_motor"] = -3.0
-            
-            # stop when facing straight down (-90 degrees is -1.57 rad)
-            if theta < -1.4:
-                self.state_counter += 1
-            else:
-                self.state_counter = 0
-                
-            if self.state_counter >= required_frames:
-                self.robot_state = "DRIVE_2"
-                self.state_counter = 0
-
-        elif self.robot_state == "DRIVE_2":
-            # drive straight down to bottom-right box (~1.0, -1.0)
-            control_dict["left_motor"] = 3.0
-            control_dict["right_motor"] = 3.0
-            
-            # stop when we are within 1ish tile of box
-            if y < -1.6:
-                self.state_counter += 1
-            else:
-                self.state_counter = 0
-                
-            if self.state_counter >= required_frames:
-                self.robot_state = "TURN_3"
-                self.state_counter = 0
-
-        # turn right 90 degrees to face left (-pi / pi)
-        elif self.robot_state == "TURN_3":
-            control_dict["left_motor"] = 3.0
-            control_dict["right_motor"] = -3.0
-            
-            # NOTE wrapping causes angle to fluctuate between 3.0 and -3.0 so abs(theta) is necessary
-            if abs(theta) > 3.0:
-                self.state_counter += 1
-            else:
-                self.state_counter = 0
-                
-            if self.state_counter >= required_frames:
-                self.robot_state = "DRIVE_3"
-                self.state_counter = 0
-
-        # drive straight left to bottom-left box (~ -1.0, -1.0)
-        elif self.robot_state == "DRIVE_3":
-            control_dict["left_motor"] = 3.0
-            control_dict["right_motor"] = 3.0
-            
-            # stop when we get close to the left wall/box
-            if x < -1.6:
-                self.state_counter += 1
-            else:
-                self.state_counter = 0
-                
-            if self.state_counter >= required_frames:
-                self.robot_state = "TURN_4"
-                self.state_counter = 0
-
-        # turn right 90 degrees to face up (+1.57 rad)
-        elif self.robot_state == "TURN_4":
-            control_dict["left_motor"] = 3.0
-            control_dict["right_motor"] = -3.0
-            
-            # catch it as soon as it drops below 1.6 radians
-            if 0.0 < theta < 1.6:
-                self.state_counter += 1
-            else:
-                self.state_counter = 0
-                
-            if self.state_counter >= required_frames:
-                self.robot_state = "DRIVE_4"
-                self.state_counter = 0
-
-        # drive straight up to top-left box (~ -1.0, 1.0)
-        elif self.robot_state == "DRIVE_4":
-            control_dict["left_motor"] = 3.0
-            control_dict["right_motor"] = 3.0
-            
-            # stop when we get close to the top wall/box
-            if y > 0.7:
-                self.state_counter += 1
-            else:
-                self.state_counter = 0
-                
-            if self.state_counter >= required_frames:
-                self.robot_state = "SPIN_IN_PLACE"
-                self.state_counter = 0
-
-        elif self.robot_state == "SPIN_IN_PLACE":
-            # victory dance
-            control_dict["left_motor"] = -3.0
-            control_dict["right_motor"] = 3.0
-
+        # update pyplot every 10 frames
         self.step_count += 1
         if self.step_count % 10 == 0:
             self.update_plot()
