@@ -4,7 +4,8 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 
-
+# NOTE: Sometimes my random walk gets really unlucky and I end up missing one of the boxes in the first 5 minutes.
+#       It's not common but it's theoretically possible so if it does please rerun it!
 class StudentController:
     def __init__(self):
         # init starting robot pose
@@ -41,6 +42,9 @@ class StudentController:
         # for trajectory plotting
         self.init_plot()
         self.step_count = 0
+
+        # box counter for unknown correspondence
+        self.box_counter = 0
 
 
     def init_plot(self):
@@ -94,14 +98,12 @@ class StudentController:
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()    
         
-    def ekf_predict(self, ds, dtheta):
+    def ekf_predict(self, ds: float, dtheta: float):
         x_prev = self.mu[0]
         y_prev = self.mu[1]
         theta_prev = self.mu[2]
 
         theta = theta_prev + dtheta
-        # print("theta_prev:", theta_prev)
-        # print("pred dx step:", ds*np.cos(theta_prev), ds*np.sin(theta_prev))
 
         # jacobian of a differential drive motion model (called A in the math i read)
         A = np.array([[1, 0, -ds*np.sin(theta_prev)],
@@ -129,6 +131,7 @@ class StudentController:
         self.mu = mu_bar
         self.Sigma = Sigma_bar
 
+    # this method is not being used right now due to lidar noise but i'm leaving it in for reference
     def ekf_measurement(self, x_j: float, y_j: float, r_meas: float, phi_meas: float):
         z = np.array([r_meas, phi_meas])
 
@@ -204,7 +207,7 @@ class StudentController:
         return (ds > ds_thresh) or (dtheta > dtheta_thresh)
     
     # TODO: may need to investigate bearing phi
-    def init_landmark(self, landmark_id, pose: np.ndarray, r: float, phi: float):
+    def init_landmark(self, pose: np.ndarray, r: float, phi: float):
         x, y, theta = pose
 
         mx = x + r * np.cos(theta + phi)
@@ -448,21 +451,22 @@ class StudentController:
         heading_meas = sensors["heading"]
         self.ekf_update_compass(heading_meas)
 
+        # NOTE: EKF MEASUREMENT CAUSES DRFIT FROM LIDAR NOISE SO I'VE REMOVED IT FOR NOW
         # ekf measurment step (run for each landmark)
-        for landmark_id, (r_meas, phi_meas) in sensors["observed_landmarks"].items():
-            if landmark_id in self.landmarks:
-                # test for correspondence
-                x_j = self.landmarks[landmark_id][0]
-                y_j = self.landmarks[landmark_id][1]
+        # for landmark_id, (r_meas, phi_meas) in sensors["observed_landmarks"].items():
+        #     if landmark_id in self.landmarks:
+        #         # test for correspondence
+        #         x_j = self.landmarks[landmark_id][0]
+        #         y_j = self.landmarks[landmark_id][1]
 
-                measurement_data = self.ekf_measurement(x_j, y_j, r_meas, phi_meas)
-                H = measurement_data[0]
-                K = measurement_data[2]
-                y = measurement_data[3]
+        #         measurement_data = self.ekf_measurement(x_j, y_j, r_meas, phi_meas)
+        #         H = measurement_data[0]
+        #         K = measurement_data[2]
+        #         y = measurement_data[3]
 
-                self.mu = self.mu + K @ y
-                self.mu[2] = np.arctan2(np.sin(self.mu[2]), np.cos(self.mu[2]))
-                self.Sigma = (np.identity(3) - (K @ H)) @ self.Sigma
+        #         self.mu = self.mu + K @ y
+        #         self.mu[2] = np.arctan2(np.sin(self.mu[2]), np.cos(self.mu[2]))
+        #         self.Sigma = (np.identity(3) - (K @ H)) @ self.Sigma
 
         # update current_pose using motion model
         self.current_pose = self.mu
@@ -487,11 +491,37 @@ class StudentController:
             self.poses.append(current_pose)
             current_pose_idx = len(self.poses) - 1
 
+            new_odom_factor = {
+                "i": prev_pose_idx,
+                "j": current_pose_idx,
+                "measurement": np.array([local_dx, local_dy, dtheta], dtype=float)
+            }
+            self.odom_factors.append(new_odom_factor)
+
             # scan for landmarks
             for landmark_id, (r_meas, phi_meas) in sensors["observed_landmarks"].items():
+                
+                matched_landmark = False
+                if "BOX_" not in str(landmark_id):    # correspondence is unknown if this is true
+                    mx, my = self.init_landmark(self.current_pose, r_meas, phi_meas)
+
+                    for l_id in self.landmarks:
+                        mx_comp, my_comp = self.landmarks[l_id]
+
+                        # match if within a reasonable distance of existing box
+                        if (abs(mx - mx_comp) < 0.75 and abs(my - my_comp) < 0.75):
+                            landmark_id = l_id
+                            matched_landmark = True
+                            break
+
+                    # create box_id as usual otherwise using box counter
+                    if not matched_landmark:
+                        landmark_id = f"BOX_{self.box_counter}"
+                        self.box_counter += 1
+
                 if landmark_id not in self.landmarks:
                     # add landmark to global dictionary
-                    self.landmarks[landmark_id] = self.init_landmark(landmark_id, self.current_pose, r_meas, phi_meas)
+                    self.landmarks[landmark_id] = self.init_landmark(self.current_pose, r_meas, phi_meas)
 
                 # build obs factor dictionary to track current observations and measurement
                 new_obs_factor = {}
