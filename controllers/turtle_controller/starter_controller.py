@@ -30,6 +30,10 @@ class StudentController:
         self.rotation_threshold = 0.3
         self.optimize_every = 10
 
+        # ekf for a fast updates
+        self.mu = np.array([0.0, 0.0, 0.0])
+        self.Sigma = np.diag([0.001, 0.001, 0.001])
+
         # for fsm drive behavior
         self.robot_state = "TURN_1"
         self.state_counter = 0
@@ -90,8 +94,92 @@ class StudentController:
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()    
         
-    # GRAPH HELPER METHODS (there a lot of them):
+    def ekf_predict(self, ds, dtheta):
+        x_prev = self.mu[0]
+        y_prev = self.mu[1]
+        theta_prev = self.mu[2]
 
+        theta = theta_prev + dtheta
+        # print("theta_prev:", theta_prev)
+        # print("pred dx step:", ds*np.cos(theta_prev), ds*np.sin(theta_prev))
+
+        # jacobian of a differential drive motion model (called A in the math i read)
+        A = np.array([[1, 0, -ds*np.sin(theta_prev)],
+                        [0, 1, ds*np.cos(theta_prev)], 
+                        [0, 0, 1]
+        ])
+
+        # mean state as predicted by motion model
+        mu_bar = np.array([x_prev + ds*np.cos(theta_prev), 
+                        y_prev + ds*np.sin(theta_prev),
+                        np.arctan2(np.sin(theta), np.cos(theta))
+        ])
+
+        # simple noise, tune with velocity and coefficients later
+        Q = np.diag([ 
+            (0.1 * ds + 0.005)**2, 
+            (0.1 * ds + 0.005)**2, 
+            (0.1 * abs(dtheta) + 0.005)**2 
+        ])
+
+        # compute covariance matrix
+        Sigma_bar = A @ self.Sigma @ A.T + Q
+
+        # update our global sigma and mu
+        self.mu = mu_bar
+        self.Sigma = Sigma_bar
+
+    def ekf_measurement(self, x_j: float, y_j: float, r_meas: float, phi_meas: float):
+        z = np.array([r_meas, phi_meas])
+
+        dx = x_j - self.mu[0]
+        dy = y_j - self.mu[1]
+
+        q = dx**2 + dy**2
+
+        r_pred = np.sqrt(q)
+        phi_pred = np.arctan2(dy, dx) - self.mu[2]
+        phi_pred = np.arctan2(np.sin(phi_pred), np.cos(phi_pred))
+
+        z_hat = np.array([r_pred, phi_pred])
+
+        # observation model jacobian
+        H = np.array([[-dx/r_pred, -dy/r_pred, 0],
+                      [dy/q, -dx/q, -1]
+        ])
+
+        # no sensor noise in compass esentially
+        R = np.diag([0.15**2, 0.05**2])
+
+        # innovation covariance
+        S = H @ self.Sigma @ H.T + R
+
+        # kalman gain
+        K = self.Sigma @ H.T @ np.linalg.inv(S) 
+
+        # measurement error also wrapping angle
+        y = z - z_hat
+        y[1] = np.arctan2(np.sin(y[1]), np.cos(y[1]))
+
+        return H, S, K, y
+    
+    def ekf_update_compass(self, heading_meas: float):
+        # trust the compass because noise is 0
+        H = np.array([[0.0, 0.0, 1.0]])
+        R = np.array([[0.000001]])
+        
+        # innovation angle
+        y = np.array([self.wrap_angle(heading_meas - self.mu[2])])
+        
+        S = H @ self.Sigma @ H.T + R
+        K = self.Sigma @ H.T @ np.linalg.inv(S)
+        
+        # ppdate state and covariance and flatten
+        self.mu = self.mu + (K @ y).flatten()
+        self.mu[2] = self.wrap_angle(self.mu[2])
+        self.Sigma = (np.identity(3) - K @ H) @ self.Sigma
+
+    # GRAPH HELPER METHODS (there a lot of them):
     # angle wrapper helper
     def wrap_angle(self, theta):
         return np.arctan2(np.sin(theta), np.cos(theta))
@@ -140,7 +228,7 @@ class StudentController:
         x_j, y_j, theta_j = pose_j
         
         ds_meas = measurement[0]
-        # measurement[1] is 0.0
+        dy_meas = measurement[1]
         dtheta_meas = measurement[2]
 
         c = np.cos(theta_i)
@@ -155,7 +243,7 @@ class StudentController:
 
         d_rot = R @ d
         e = np.array([[d_rot[0] - ds_meas], 
-                      [d_rot[1] - 0.0],
+                      [d_rot[1] - dy_meas],
                       [self.wrap_angle(dtheta - dtheta_meas)]], dtype=float)
 
         A = np.array([[-c, -s, -s*dx + c*dy],
@@ -168,10 +256,6 @@ class StudentController:
         return e, A, B
     
     def compute_obs_factor(self, pose: np.ndarray, landmark: np.ndarray, measurement: np.ndarray):
-        """
-        measurement: np.array([r, phi])
-        Returns e (2x1 array), Jx (2x3 array), Jm (2x2 array)
-        """
         x, y, theta = pose
         mx, my = landmark
         r_meas, phi_meas = measurement
@@ -289,6 +373,9 @@ class StudentController:
                 g[p_start:p_end, 0:] += g_x
                 g[m_start:m_end, 0:] += g_m
 
+            # tikhonov regularization (stops landmark pose from being calculate on top of robot causing divide by inf error)
+            H += np.eye(dim) * 1e-5
+
             # computer go brrr (solving optimzation)
             delta = np.linalg.solve(H, -g)
 
@@ -314,6 +401,9 @@ class StudentController:
 
         # update current pose with optimized value
         self.current_pose = self.poses[-1].copy()
+
+        self.mu = self.current_pose.copy()
+        self.Sigma = np.diag([0.001, 0.001, 0.001])
         
     # LOOP:
     def step(self, sensors):
@@ -351,28 +441,51 @@ class StudentController:
         self.accumulated_dtheta += dtheta
         self.accumulated_dtheta = self.wrap_angle(self.accumulated_dtheta)
 
+        # ekf prediction step (should update global mean covariance)
+        self.ekf_predict(ds, dtheta)
+
+        # use compass to update rotation before looking landmarks for ekf
+        heading_meas = sensors["heading"]
+        self.ekf_update_compass(heading_meas)
+
+        # ekf measurment step (run for each landmark)
+        for landmark_id, (r_meas, phi_meas) in sensors["observed_landmarks"].items():
+            if landmark_id in self.landmarks:
+                # test for correspondence
+                x_j = self.landmarks[landmark_id][0]
+                y_j = self.landmarks[landmark_id][1]
+
+                measurement_data = self.ekf_measurement(x_j, y_j, r_meas, phi_meas)
+                H = measurement_data[0]
+                K = measurement_data[2]
+                y = measurement_data[3]
+
+                self.mu = self.mu + K @ y
+                self.mu[2] = np.arctan2(np.sin(self.mu[2]), np.cos(self.mu[2]))
+                self.Sigma = (np.identity(3) - (K @ H)) @ self.Sigma
+
         # update current_pose using motion model
-        self.current_pose = self.propagate_pose(self.current_pose, ds, dtheta)
+        self.current_pose = self.mu
 
         # when new keyframe threshold reached
         if self.keyframe_decision(self.poses[-1], self.current_pose, self.translation_threshold, self.rotation_threshold):
-            # calculate indices for last and new keyframe poses and add a copy of the current pose to poses
+            last_pose = self.poses[-1]
+            current_pose = self.mu.copy()
+            
+            dx = current_pose[0] - last_pose[0]
+            dy = current_pose[1] - last_pose[1]
+            dtheta = self.wrap_angle(current_pose[2] - last_pose[2])
+            
+            # Transform global dx, dy into the local frame of the last keyframe
+            c = np.cos(last_pose[2])
+            s = np.sin(last_pose[2])
+            local_dx = c * dx + s * dy
+            local_dy = -s * dx + c * dy
+
+            # 2. Add to poses array
             prev_pose_idx = len(self.poses) - 1
-            self.poses.append(self.current_pose.copy())
+            self.poses.append(current_pose)
             current_pose_idx = len(self.poses) - 1
-
-            # build odom factor dictionary to track last keyframe pose and new keyframe pose and difference between
-            new_odom_factor = {}
-            new_odom_factor["i"] = prev_pose_idx
-            new_odom_factor["j"] = current_pose_idx
-            new_odom_factor["measurement"] = np.array([self.accumulated_ds, 0.0, self.accumulated_dtheta], dtype=float)
-
-            # add new odom factor to global list
-            self.odom_factors.append(new_odom_factor)
-
-            # reset accumulation for next keyframe
-            self.accumulated_ds = 0.0
-            self.accumulated_dtheta = 0.0
 
             # scan for landmarks
             for landmark_id, (r_meas, phi_meas) in sensors["observed_landmarks"].items():
@@ -391,7 +504,7 @@ class StudentController:
                 self.run_graph_optimization()
 
 
-        estimated_pose = self.current_pose
+        estimated_pose = self.current_pose.tolist()
         estimated_map = self.landmarks
 
         x = estimated_pose[0]
